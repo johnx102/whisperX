@@ -1,24 +1,30 @@
 FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
-# Install system dependencies
-RUN apt-get update && \
-    apt-get install -y git ffmpeg libsndfile1 python3 python3-pip && \
-    apt-get clean
+# Installer dépendances système
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    ffmpeg \
+    git \
+    libsndfile1 \
+    && apt-get clean
 
-# Python dependencies
+# Mise à jour de pip
 RUN pip install --upgrade pip
 
-# Install WhisperX with dependencies
-RUN pip install git+https://github.com/m-bain/whisperx.git
+# Installer les paquets Python requis AVANT d'exécuter des scripts Python
 RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-RUN pip install soundfile
+RUN pip install transformers==4.40.1
 
-# (Optionnel) Si tu veux activer la diarisation
-# RUN pip install pyannote-audio
-# RUN pyannote-audio download pretrained --force
+# Installer tensorflow pour pouvoir utiliser from_tf=True
+RUN pip install tensorflow==2.15.0
 
-# Créer dossier pour app
+# Précharger le modèle Whisper large-v2 en version TF (converti en torch)
+RUN python3 -c "from transformers import WhisperForConditionalGeneration; WhisperForConditionalGeneration.from_pretrained('openai/whisper-large-v2', from_tf=True, cache_dir='/models/whisper-large-v2')"
+
+# Créer le dossier de l'app
 WORKDIR /app
-COPY serverless_main.py .
+COPY . /app
 
+# Commande par défaut
 CMD ["python3", "serverless_main.py"]
