@@ -1,5 +1,5 @@
-# Version simplifiée et stable
-FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+# Version corrigée avec image CUDA plus récente
+FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
 
 # Set working directory
 WORKDIR /app
@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y \
     python3.11 \
     python3.11-dev \
     python3-pip \
+    python3.11-venv \
+    build-essential \
     ffmpeg \
     libsndfile1 \
     git \
@@ -22,20 +24,22 @@ RUN apt-get update && apt-get install -y \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
-# Upgrade pip
-RUN python -m pip install --upgrade pip
+# Upgrade pip and install wheel
+RUN python -m pip install --upgrade pip setuptools wheel
 
-# Install PyTorch with CUDA support first
+# Install PyTorch with CUDA support first (compatible avec CUDA 12.2)
 RUN pip install --no-cache-dir \
     torch==2.1.0+cu121 \
     torchaudio==2.1.0+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
 
+# Install ctranslate2 first (version spécifique stable)
+RUN pip install --no-cache-dir ctranslate2==3.24.0
+
 # Install other core dependencies
 RUN pip install --no-cache-dir \
-    faster-whisper==1.1.0 \
-    "ctranslate2<4.5.0" \
-    transformers \
+    faster-whisper==1.0.1 \
+    transformers==4.36.2 \
     pandas \
     setuptools>=65 \
     nltk \
@@ -68,15 +72,19 @@ RUN mkdir -p /models/cache
 RUN useradd -m -u 1001 whisperx
 RUN chown -R whisperx:whisperx /app /models
 
-# Copy only main.py (models will be downloaded at runtime)
-COPY --chown=whisperx:whisperx main.py /app/
+# Copy main.py as both main.py and handler.py for RunPod compatibility
+COPY --chown=whisperx:whisperx main.py /app/main.py
+COPY --chown=whisperx:whisperx main.py /app/handler.py
+
+# Test ctranslate2 installation
+RUN python -c "import ctranslate2; print('ctranslate2 version:', ctranslate2.__version__)"
 
 # Switch to non-root user
 USER whisperx
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD python -c "import whisperx; print('WhisperX ready')" || exit 1
+    CMD python -c "import whisperx, ctranslate2; print('WhisperX ready')" || exit 1
 
 # Start the serverless handler
 CMD ["python", "-u", "main.py"]
