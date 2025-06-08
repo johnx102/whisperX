@@ -69,7 +69,46 @@ RUN chown -R whisperx:whisperx /app /models
 
 # Copy application files
 COPY --chown=whisperx:whisperx main.py /app/
-COPY --chown=whisperx:whisperx download_models.py /app/
+
+# Create download_models.py script directly in container
+RUN echo '#!/usr/bin/env python3
+"""
+Pre-download WhisperX models during Docker build
+"""
+
+import os
+import whisperx
+
+def download_models():
+    """Download commonly used models"""
+    
+    device = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
+    compute_type = "float16" if device == "cuda" else "float32"
+    
+    models_to_download = [
+        "base",
+        "small", 
+        "medium"
+    ]
+    
+    print(f"Downloading models for device: {device}")
+    
+    for model_size in models_to_download:
+        try:
+            print(f"Downloading {model_size}...")
+            model = whisperx.load_model(
+                model_size, 
+                device=device, 
+                compute_type=compute_type,
+                download_root="/models/cache"
+            )
+            print(f"✓ {model_size} downloaded successfully")
+            del model  # Free memory
+        except Exception as e:
+            print(f"✗ Failed to download {model_size}: {str(e)}")
+
+if __name__ == "__main__":
+    download_models()' > /app/download_models.py && chmod +x /app/download_models.py
 
 # Pre-download models during build (optional - reduces cold start time)
 RUN python download_models.py || echo "Model download failed - will download at runtime"
