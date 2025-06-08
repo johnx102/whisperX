@@ -44,6 +44,9 @@ class TranscriptionRequest(BaseModel):
     compute_type: Optional[str] = "float16"
     batch_size: Optional[int] = 16
     enable_diarization: Optional[bool] = False
+    min_speakers: Optional[int] = None
+    max_speakers: Optional[int] = None
+    num_speakers: Optional[int] = None
     return_char_alignments: Optional[bool] = False
     hf_token: Optional[str] = None
     
@@ -243,7 +246,17 @@ async def process_transcription(
                     )
                     models['diarize_model'] = diarize_model
                 
-                diarize_segments = models['diarize_model'](audio)
+                # Prepare diarization parameters
+                diarization_params = {}
+                if request.min_speakers is not None:
+                    diarization_params['min_speakers'] = request.min_speakers
+                if request.max_speakers is not None:
+                    diarization_params['max_speakers'] = request.max_speakers
+                if request.num_speakers is not None:
+                    diarization_params['num_speakers'] = request.num_speakers
+                
+                print(f"Diarization parameters: {diarization_params}")
+                diarize_segments = models['diarize_model'](audio, **diarization_params)
                 result = whisperx.assign_word_speakers(diarize_segments, result)
             except Exception as e:
                 print(f"Diarization failed: {str(e)}")
