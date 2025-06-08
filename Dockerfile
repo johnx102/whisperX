@@ -1,4 +1,4 @@
-FROM runpod/base:0.6.2-cuda12.4.1 AS base
+FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04 AS base
 
 # Set working directory
 WORKDIR /app
