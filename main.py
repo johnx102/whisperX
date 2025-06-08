@@ -199,11 +199,19 @@ async def process_transcription(
         
         # Transcribe
         print("Starting transcription...")
-        result = models['whisper'].transcribe(
-            audio, 
-            batch_size=request.batch_size,
-            language=request.language if request.language != "auto" else None
-        )
+        transcribe_params = {
+            'audio': audio,
+            'batch_size': request.batch_size
+        }
+        
+        # Add language parameter if specified (and not auto)
+        if request.language and request.language.lower() != "auto":
+            print(f"Using specified language: {request.language}")
+            transcribe_params['language'] = request.language
+        else:
+            print("Using automatic language detection")
+            
+        result = models['whisper'].transcribe(**transcribe_params)
         
         detected_language = result.get("language", "unknown")
         print(f"Detected language: {detected_language}")
