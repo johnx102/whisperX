@@ -133,7 +133,7 @@ class TranscriptionRequest(BaseModel):
     
     # NOUVEAUX PARAMÈTRES VAD
     use_vad: Optional[bool] = True
-    vad_threshold: Optional[float] = 0.5
+    vad_threshold: Optional[float] = 0.3
     
     @validator('model_size')
     def validate_model_size(cls, v):
