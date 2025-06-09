@@ -184,7 +184,8 @@ async def process_transcription(
     temp_file_path = None
     
     # Debug log pour vérifier que le code est à jour
-    print(f"🔧 DEBUG: Processing transcription with diarization={request.enable_diarization}, token_present={bool(request.hf_token)}")
+    hf_token = request.hf_token or os.getenv('HF_TOKEN')
+    print(f"🔧 DEBUG: Processing transcription with diarization={request.enable_diarization}, token_present={bool(hf_token)}")
     
     try:
         # Save audio data to temporary file
@@ -247,12 +248,15 @@ async def process_transcription(
                 # Continue without alignment
         
         # Optional speaker diarization
-        if request.enable_diarization and request.hf_token:
+        # Récupérer le token HF depuis l'env si pas fourni dans la requête
+        hf_token = request.hf_token or os.getenv('HF_TOKEN')
+        
+        if request.enable_diarization and hf_token:
             try:
                 print("Performing speaker diarization...")
                 if models['diarize_model'] is None:
                     diarize_model = whisperx.DiarizationPipeline(
-                        use_auth_token=request.hf_token, 
+                        use_auth_token=hf_token, 
                         device=device
                     )
                     models['diarize_model'] = diarize_model
@@ -276,6 +280,8 @@ async def process_transcription(
             except Exception as e:
                 print(f"Diarization failed: {str(e)}")
                 # Continue without diarization
+        elif request.enable_diarization and not hf_token:
+            print("⚠️  Diarization requested but no HF_TOKEN found in environment or request")
         
         # Extract full text
         if isinstance(result, dict) and 'segments' in result:
