@@ -81,7 +81,6 @@ def setup_models():
     compute_type = "float16" if device == "cuda" else "float32"
     
     try:
-        # Load main Whisper model (will be loaded per request with different sizes)
         print(f"Setting up models on device: {device}")
         return device, compute_type
     except Exception as e:
@@ -97,7 +96,7 @@ async def validate_url_security(url: str) -> bool:
         if parsed.scheme not in ['http', 'https']:
             raise ValueError("Invalid URL scheme. Only HTTP and HTTPS are allowed.")
         
-        # Basic domain validation (you may want to add more restrictions)
+        # Basic domain validation
         if not parsed.hostname:
             raise ValueError("Invalid hostname in URL")
             
@@ -121,7 +120,6 @@ async def download_audio_file(url: str) -> bytes:
                 # Check content type
                 content_type = response.headers.get('content-type', '').lower()
                 if not any(fmt in content_type for fmt in SUPPORTED_FORMATS):
-                    # Still proceed - WhisperX can handle many formats via ffmpeg
                     print(f"Warning: Unrecognized content-type: {content_type}")
                 
                 # Check file size
@@ -145,9 +143,6 @@ async def download_audio_file(url: str) -> bytes:
 def load_whisper_model(model_size: str, device: str, compute_type: str):
     """Load WhisperX model with specified parameters"""
     global models
-    
-    # Check if we already have this model loaded
-    model_key = f"{model_size}_{device}_{compute_type}"
     
     try:
         print(f"Loading WhisperX model: {model_size} on {device} with {compute_type}")
@@ -184,7 +179,7 @@ async def process_transcription(
     start_time = datetime.now()
     temp_file_path = None
     
-    # Debug log pour vérifier que le code est à jour
+    # Récupérer le token HF
     hf_token = request.hf_token or os.getenv('HF_TOKEN')
     print(f"🔧 DEBUG: Processing transcription with diarization={request.enable_diarization}, token_present={bool(hf_token)}")
     
@@ -248,141 +243,45 @@ async def process_transcription(
                 print(f"Alignment failed: {str(e)}")
                 # Continue without alignment
         
-        # Optional speaker diarization
-        # Récupérer le token HF depuis l'env si pas fourni dans la requête
-        hf_token = request.hf_token or os.getenv('HF_TOKEN')
-        
+        # Speaker diarization using WhisperX native integration
         if request.enable_diarization and hf_token:
             try:
-                print("Performing speaker diarization...")
+                print("Performing speaker diarization with WhisperX native integration...")
+                
+                # Load diarization model if not already loaded
                 if models['diarize_model'] is None:
-                    # Essayer différents modèles de diarisation
                     diarization_model = request.diarization_model or "pyannote/speaker-diarization-3.1"
+                    print(f"Loading diarization model: {diarization_model}")
                     
-                    from pyannote.audio import Pipeline
-                    diarize_model = Pipeline.from_pretrained(
-                        diarization_model,
-                        use_auth_token=hf_token
+                    diarize_model = whisperx.DiarizationPipeline(
+                        use_auth_token=hf_token,
+                        device=device
                     )
-                    diarize_model.to(torch.device(device))
                     models['diarize_model'] = diarize_model
-                    print(f"Loaded diarization model: {diarization_model}")
                 
                 # Prepare diarization parameters
                 diarization_params = {}
                 if request.min_speakers is not None:
                     diarization_params['min_speakers'] = request.min_speakers
-                    print(f"Min speakers set to: {request.min_speakers}")
                 if request.max_speakers is not None:
                     diarization_params['max_speakers'] = request.max_speakers
-                    print(f"Max speakers set to: {request.max_speakers}")
                 if request.num_speakers is not None:
                     diarization_params['num_speakers'] = request.num_speakers
-                    print(f"Num speakers set to: {request.num_speakers}")
                 
                 print(f"Diarization parameters: {diarization_params}")
                 
-                # Effectuer la diarisation avec le bon format
-                waveform = torch.from_numpy(audio).unsqueeze(0)
-                diarization_result = models['diarize_model'](
-                    {"waveform": waveform, "sample_rate": 16000},
+                # Perform diarization using WhisperX native method
+                diarize_segments = models['diarize_model'](
+                    audio, 
                     **diarization_params
                 )
                 
-                # Convertir en segments simples
-                speaker_segments = []
-                for segment, _, speaker in diarization_result.itertracks(yield_label=True):
-                    speaker_segments.append({
-                        'start': float(segment.start),
-                        'end': float(segment.end),
-                        'speaker': str(speaker)
-                    })
+                print(f"Diarization completed. Found segments with speakers.")
                 
-                print(f"Found {len(speaker_segments)} speaker segments")
+                # Assign speakers to segments using WhisperX native method
+                result = whisperx.assign_word_speakers(diarize_segments, result)
                 
-                # Post-processing : fusionner les segments courts du même speaker
-                def merge_short_segments(segments, min_duration=0.5):
-                    """Fusionne les segments très courts avec les segments adjacents du même speaker"""
-                    if not segments:
-                        return segments
-                        
-                    merged = [segments[0]]
-                    
-                    for current in segments[1:]:
-                        last = merged[-1]
-                        duration = current['end'] - current['start']
-                        
-                        # Si le segment est très court, l'attribuer au speaker majoritaire autour
-                        if duration < min_duration:
-                            # Vérifier si c'est le même speaker que le précédent
-                            if last['speaker'] == current['speaker']:
-                                # Fusionner avec le segment précédent
-                                last['end'] = current['end']
-                                continue
-                            # Sinon vérifier le segment suivant dans la liste originale
-                            elif len(segments) > segments.index(current) + 1:
-                                next_seg = segments[segments.index(current) + 1]
-                                if next_seg['speaker'] == last['speaker']:
-                                    # Attribuer au speaker précédent
-                                    current['speaker'] = last['speaker']
-                        
-                        merged.append(current)
-                    
-                    return merged
-                
-                # Appliquer le post-processing
-                speaker_segments = merge_short_segments(speaker_segments)
-                print(f"After post-processing: {len(speaker_segments)} speaker segments")
-                
-                # Assignation manuelle améliorée des speakers aux mots
-                if isinstance(result, dict) and 'segments' in result:
-                    segments = result['segments']
-                else:
-                    segments = result if isinstance(result, list) else []
-                
-                # Pour chaque segment de transcription
-                for i, seg in enumerate(segments):
-                    seg_start = seg.get('start', 0)
-                    seg_end = seg.get('end', 0)
-                    seg_duration = seg_end - seg_start
-                    
-                    # Trouver le speaker majoritaire pour ce segment
-                    speaker_overlaps = {}
-                    
-                    for spk_seg in speaker_segments:
-                        # Calculer le chevauchement
-                        overlap_start = max(seg_start, spk_seg['start'])
-                        overlap_end = min(seg_end, spk_seg['end'])
-                        overlap = max(0, overlap_end - overlap_start)
-                        
-                        if overlap > 0:
-                            speaker = spk_seg['speaker']
-                            speaker_overlaps[speaker] = speaker_overlaps.get(speaker, 0) + overlap
-                    
-                    # Sélectionner le speaker avec le plus grand chevauchement
-                    if speaker_overlaps:
-                        best_speaker = max(speaker_overlaps.items(), key=lambda x: x[1])[0]
-                        
-                        # Vérification de cohérence : si le segment est très court (< 0.5s)
-                        # et que le speaker est différent des segments adjacents, corriger
-                        if seg_duration < 0.5 and len(segments) > 1:
-                            prev_speaker = segments[i-1].get('speaker') if i > 0 else None
-                            next_speaker = segments[i+1].get('speaker') if i < len(segments)-1 else None
-                            
-                            # Si les segments adjacents ont le même speaker, utiliser celui-ci
-                            if prev_speaker and next_speaker and prev_speaker == next_speaker and prev_speaker != best_speaker:
-                                best_speaker = prev_speaker
-                                print(f"Corrected short segment {i}: {best_speaker}")
-                        
-                        # Assigner le speaker au segment
-                        seg['speaker'] = best_speaker
-                        
-                        # Assigner aussi aux mots si disponibles
-                        if 'words' in seg:
-                            for word in seg['words']:
-                                word['speaker'] = best_speaker
-                
-                print("Diarization completed successfully (manual assignment)")
+                print("Speaker assignment completed successfully")
                 
             except Exception as e:
                 print(f"Diarization failed: {str(e)}")
