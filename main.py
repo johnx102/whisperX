@@ -47,6 +47,7 @@ class TranscriptionRequest(BaseModel):
     min_speakers: Optional[int] = None
     max_speakers: Optional[int] = None
     num_speakers: Optional[int] = None
+    diarization_model: Optional[str] = "pyannote/speaker-diarization-3.1"
     return_char_alignments: Optional[bool] = False
     hf_token: Optional[str] = None
     
@@ -255,14 +256,17 @@ async def process_transcription(
             try:
                 print("Performing speaker diarization...")
                 if models['diarize_model'] is None:
-                    # Nouvelle API WhisperX pour la diarisation
+                    # Essayer différents modèles de diarisation
+                    diarization_model = request.diarization_model or "pyannote/speaker-diarization-3.1"
+                    
                     from pyannote.audio import Pipeline
                     diarize_model = Pipeline.from_pretrained(
-                        "pyannote/speaker-diarization-3.1",
+                        diarization_model,
                         use_auth_token=hf_token
                     )
                     diarize_model.to(torch.device(device))
                     models['diarize_model'] = diarize_model
+                    print(f"Loaded diarization model: {diarization_model}")
                 
                 # Prepare diarization parameters
                 diarization_params = {}
@@ -296,20 +300,54 @@ async def process_transcription(
                 
                 print(f"Found {len(speaker_segments)} speaker segments")
                 
-                # Assignation manuelle des speakers aux mots (contourne le bug WhisperX)
+                # Post-processing : fusionner les segments courts du même speaker
+                def merge_short_segments(segments, min_duration=0.5):
+                    """Fusionne les segments très courts avec les segments adjacents du même speaker"""
+                    if not segments:
+                        return segments
+                        
+                    merged = [segments[0]]
+                    
+                    for current in segments[1:]:
+                        last = merged[-1]
+                        duration = current['end'] - current['start']
+                        
+                        # Si le segment est très court, l'attribuer au speaker majoritaire autour
+                        if duration < min_duration:
+                            # Vérifier si c'est le même speaker que le précédent
+                            if last['speaker'] == current['speaker']:
+                                # Fusionner avec le segment précédent
+                                last['end'] = current['end']
+                                continue
+                            # Sinon vérifier le segment suivant dans la liste originale
+                            elif len(segments) > segments.index(current) + 1:
+                                next_seg = segments[segments.index(current) + 1]
+                                if next_seg['speaker'] == last['speaker']:
+                                    # Attribuer au speaker précédent
+                                    current['speaker'] = last['speaker']
+                        
+                        merged.append(current)
+                    
+                    return merged
+                
+                # Appliquer le post-processing
+                speaker_segments = merge_short_segments(speaker_segments)
+                print(f"After post-processing: {len(speaker_segments)} speaker segments")
+                
+                # Assignation manuelle améliorée des speakers aux mots
                 if isinstance(result, dict) and 'segments' in result:
                     segments = result['segments']
                 else:
                     segments = result if isinstance(result, list) else []
                 
                 # Pour chaque segment de transcription
-                for seg in segments:
+                for i, seg in enumerate(segments):
                     seg_start = seg.get('start', 0)
                     seg_end = seg.get('end', 0)
+                    seg_duration = seg_end - seg_start
                     
                     # Trouver le speaker majoritaire pour ce segment
-                    best_speaker = None
-                    max_overlap = 0
+                    speaker_overlaps = {}
                     
                     for spk_seg in speaker_segments:
                         # Calculer le chevauchement
@@ -317,12 +355,26 @@ async def process_transcription(
                         overlap_end = min(seg_end, spk_seg['end'])
                         overlap = max(0, overlap_end - overlap_start)
                         
-                        if overlap > max_overlap:
-                            max_overlap = overlap
-                            best_speaker = spk_seg['speaker']
+                        if overlap > 0:
+                            speaker = spk_seg['speaker']
+                            speaker_overlaps[speaker] = speaker_overlaps.get(speaker, 0) + overlap
                     
-                    # Assigner le speaker au segment
-                    if best_speaker:
+                    # Sélectionner le speaker avec le plus grand chevauchement
+                    if speaker_overlaps:
+                        best_speaker = max(speaker_overlaps.items(), key=lambda x: x[1])[0]
+                        
+                        # Vérification de cohérence : si le segment est très court (< 0.5s)
+                        # et que le speaker est différent des segments adjacents, corriger
+                        if seg_duration < 0.5 and len(segments) > 1:
+                            prev_speaker = segments[i-1].get('speaker') if i > 0 else None
+                            next_speaker = segments[i+1].get('speaker') if i < len(segments)-1 else None
+                            
+                            # Si les segments adjacents ont le même speaker, utiliser celui-ci
+                            if prev_speaker and next_speaker and prev_speaker == next_speaker and prev_speaker != best_speaker:
+                                best_speaker = prev_speaker
+                                print(f"Corrected short segment {i}: {best_speaker}")
+                        
+                        # Assigner le speaker au segment
                         seg['speaker'] = best_speaker
                         
                         # Assigner aussi aux mots si disponibles
