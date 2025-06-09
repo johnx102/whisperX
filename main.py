@@ -285,11 +285,53 @@ async def process_transcription(
                     **diarization_params
                 )
                 
-                print(f"Found {len(list(diarization_result.itertracks()))} speaker segments")
+                # Convertir en segments simples
+                speaker_segments = []
+                for segment, _, speaker in diarization_result.itertracks(yield_label=True):
+                    speaker_segments.append({
+                        'start': float(segment.start),
+                        'end': float(segment.end),
+                        'speaker': str(speaker)
+                    })
                 
-                # Utiliser directement l'objet pyannote pour assign_word_speakers
-                result = whisperx.assign_word_speakers(diarization_result, result)
-                print("Diarization completed successfully")
+                print(f"Found {len(speaker_segments)} speaker segments")
+                
+                # Assignation manuelle des speakers aux mots (contourne le bug WhisperX)
+                if isinstance(result, dict) and 'segments' in result:
+                    segments = result['segments']
+                else:
+                    segments = result if isinstance(result, list) else []
+                
+                # Pour chaque segment de transcription
+                for seg in segments:
+                    seg_start = seg.get('start', 0)
+                    seg_end = seg.get('end', 0)
+                    
+                    # Trouver le speaker majoritaire pour ce segment
+                    best_speaker = None
+                    max_overlap = 0
+                    
+                    for spk_seg in speaker_segments:
+                        # Calculer le chevauchement
+                        overlap_start = max(seg_start, spk_seg['start'])
+                        overlap_end = min(seg_end, spk_seg['end'])
+                        overlap = max(0, overlap_end - overlap_start)
+                        
+                        if overlap > max_overlap:
+                            max_overlap = overlap
+                            best_speaker = spk_seg['speaker']
+                    
+                    # Assigner le speaker au segment
+                    if best_speaker:
+                        seg['speaker'] = best_speaker
+                        
+                        # Assigner aussi aux mots si disponibles
+                        if 'words' in seg:
+                            for word in seg['words']:
+                                word['speaker'] = best_speaker
+                
+                print("Diarization completed successfully (manual assignment)")
+                
             except Exception as e:
                 print(f"Diarization failed: {str(e)}")
                 print(f"Diarization error details: {traceback.format_exc()}")
