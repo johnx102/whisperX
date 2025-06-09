@@ -258,14 +258,18 @@ async def process_transcription(
                 diarization_params = {}
                 if request.min_speakers is not None:
                     diarization_params['min_speakers'] = request.min_speakers
+                    print(f"Min speakers set to: {request.min_speakers}")
                 if request.max_speakers is not None:
                     diarization_params['max_speakers'] = request.max_speakers
+                    print(f"Max speakers set to: {request.max_speakers}")
                 if request.num_speakers is not None:
                     diarization_params['num_speakers'] = request.num_speakers
+                    print(f"Num speakers set to: {request.num_speakers}")
                 
                 print(f"Diarization parameters: {diarization_params}")
                 diarize_segments = models['diarize_model'](audio, **diarization_params)
                 result = whisperx.assign_word_speakers(diarize_segments, result)
+                print("Diarization completed successfully")
             except Exception as e:
                 print(f"Diarization failed: {str(e)}")
                 # Continue without diarization
