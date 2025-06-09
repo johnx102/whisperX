@@ -278,12 +278,23 @@ async def process_transcription(
                 
                 print(f"Diarization parameters: {diarization_params}")
                 
-                # Effectuer la diarisation
+                # Effectuer la diarisation avec le bon format
                 waveform = torch.from_numpy(audio).unsqueeze(0)
-                diarize_segments = models['diarize_model'](
+                diarization_result = models['diarize_model'](
                     {"waveform": waveform, "sample_rate": 16000},
                     **diarization_params
                 )
+                
+                # Convertir le résultat pyannote en format WhisperX
+                diarize_segments = []
+                for segment, _, speaker in diarization_result.itertracks(yield_label=True):
+                    diarize_segments.append({
+                        'start': segment.start,
+                        'end': segment.end,
+                        'speaker': speaker
+                    })
+                
+                print(f"Found {len(diarize_segments)} speaker segments")
                 
                 # Assigner les speakers aux segments WhisperX
                 result = whisperx.assign_word_speakers(diarize_segments, result)
