@@ -4,14 +4,11 @@ import tempfile
 import asyncio
 import gc
 import traceback
-import numpy as np
 from typing import Optional, Dict, Any
 from datetime import datetime
 from urllib.parse import urlparse
 
 import torch
-import torchaudio
-import pandas as pd
 import aiohttp
 import aiofiles
 import runpod
@@ -32,89 +29,12 @@ SUPPORTED_FORMATS = {
     'audio/ogg', 'audio/flac', 'video/mp4', 'video/avi'
 }
 
-class SileroVADHelper:
-    """
-    Helper pour Silero VAD - amélioration de la diarisation
-    """
-    def __init__(self):
-        self.model = None
-        self.utils = None
-        self._load_model()
-    
-    def _load_model(self):
-        """Charge le modèle Silero VAD une seule fois"""
-        try:
-            self.model, self.utils = torch.hub.load(
-                repo_or_dir='snakers4/silero-vad',
-                model='silero_vad',
-                force_reload=False,
-                onnx=True  # Version optimisée
-            )
-            print("✅ Silero VAD loaded successfully")
-        except Exception as e:
-            print(f"❌ Error loading Silero VAD: {e}")
-            self.model = None
-    
-    def clean_audio_for_diarization(self, audio_numpy: np.ndarray, threshold: float = 0.5):
-        """
-        Nettoie l'audio avec VAD avant diarisation
-        
-        Args:
-            audio_numpy: Audio numpy array (16kHz)
-            threshold: Seuil de confiance VAD (0.3=sensible, 0.7=strict)
-        
-        Returns:
-            tuple: (clean_audio_tensor, success)
-        """
-        if self.model is None:
-            return torch.from_numpy(audio_numpy), False
-        
-        try:
-            # Extraction des fonctions
-            (get_speech_timestamps, save_audio, read_audio, 
-             VADIterator, collect_chunks) = self.utils
-            
-            # Conversion audio pour Silero (besoin d'un tensor)
-            if isinstance(audio_numpy, np.ndarray):
-                wav_tensor = torch.from_numpy(audio_numpy)
-            else:
-                wav_tensor = audio_numpy
-                
-            # Détection segments de parole
-            speech_timestamps = get_speech_timestamps(
-                wav_tensor, 
-                self.model,
-                threshold=threshold,
-                sampling_rate=16000,
-                min_speech_duration_ms=250,
-                min_silence_duration_ms=100,
-                speech_pad_ms=30
-            )
-            
-            if not speech_timestamps:
-                print("⚠️ No speech detected by Silero VAD")
-                return torch.from_numpy(audio_numpy), False
-            
-            # Collecter les chunks de parole uniquement
-            clean_speech = collect_chunks(speech_timestamps, wav_tensor)
-            
-            print(f"✅ VAD: {len(speech_timestamps)} speech segments extracted")
-            print(f"   Original audio: {len(audio_numpy)/16000:.1f}s")
-            print(f"   Clean speech: {len(clean_speech)/16000:.1f}s")
-            
-            return clean_speech, True
-                
-        except Exception as e:
-            print(f"❌ VAD processing error: {e}")
-            return torch.from_numpy(audio_numpy), False
-
 # Global model storage
 models = {
     'whisper': None,
     'align_model': None,
     'align_metadata': None,
-    'diarize_model': None,
-    'vad_helper': None  # NOUVEAU
+    'diarize_model': None
 }
 
 class TranscriptionRequest(BaseModel):
@@ -130,10 +50,6 @@ class TranscriptionRequest(BaseModel):
     diarization_model: Optional[str] = "pyannote/speaker-diarization-3.1"
     return_char_alignments: Optional[bool] = False
     hf_token: Optional[str] = None
-    
-    # NOUVEAUX PARAMÈTRES VAD
-    use_vad: Optional[bool] = True
-    vad_threshold: Optional[float] = 0.3
     
     @validator('model_size')
     def validate_model_size(cls, v):
@@ -181,11 +97,6 @@ def setup_models():
             
             # Nettoyer la mémoire GPU au démarrage
             torch.cuda.empty_cache()
-        
-        # NOUVEAU: Initialiser Silero VAD
-        if models['vad_helper'] is None:
-            print("🎤 Initializing Silero VAD...")
-            models['vad_helper'] = SileroVADHelper()
             
         return device, compute_type
     except Exception as e:
@@ -296,7 +207,7 @@ async def process_transcription(
     
     # Récupérer le token HF
     hf_token = request.hf_token or os.getenv('HF_TOKEN')
-    print(f"🔧 DEBUG: Processing transcription with diarization={request.enable_diarization}, token_present={bool(hf_token)}, use_vad={request.use_vad}")
+    print(f"🔧 DEBUG: Processing transcription with diarization={request.enable_diarization}, token_present={bool(hf_token)}")
     
     try:
         # Save audio data to temporary file
@@ -377,13 +288,14 @@ async def process_transcription(
                 print(f"Alignment failed: {str(e)}")
                 # Continue without alignment
         
-        # Speaker diarization with Silero VAD preprocessing
+        # Speaker diarization using exact WhisperX example approach
         if request.enable_diarization and hf_token:
             try:
-                print("Starting speaker diarization with VAD preprocessing...")
+                print("Starting speaker diarization...")
                 
-                # Load diarization model
+                # Load diarization model exactly as in WhisperX docs
                 diarization_model = request.diarization_model or "pyannote/speaker-diarization-3.1"
+                model_key = f"diarize_{diarization_model.replace('/', '_')}"
                 
                 if models['diarize_model'] is None or models.get('diarize_model_name') != diarization_model:
                     from pyannote.audio import Pipeline
@@ -399,24 +311,6 @@ async def process_transcription(
                     models['diarize_model_name'] = diarization_model
                     print(f"✅ Diarization model loaded on {device}")
                 
-                # NOUVEAU: Préprocessing VAD
-                if request.use_vad and models['vad_helper'] and models['vad_helper'].model:
-                    print(f"🎤 Applying Silero VAD preprocessing (threshold: {request.vad_threshold})...")
-                    clean_audio_tensor, vad_success = models['vad_helper'].clean_audio_for_diarization(
-                        audio, 
-                        threshold=request.vad_threshold
-                    )
-                    
-                    if vad_success:
-                        print("✅ Using VAD-cleaned audio for diarization")
-                        waveform = clean_audio_tensor.unsqueeze(0)
-                    else:
-                        print("⚠️ VAD preprocessing failed, using original audio")
-                        waveform = torch.from_numpy(audio).unsqueeze(0)
-                else:
-                    print("ℹ️ Using original audio (VAD disabled or unavailable)")
-                    waveform = torch.from_numpy(audio).unsqueeze(0)
-                
                 # Prepare parameters for diarization
                 diarization_kwargs = {}
                 if request.min_speakers is not None:
@@ -427,6 +321,10 @@ async def process_transcription(
                     diarization_kwargs['num_speakers'] = request.num_speakers
                 
                 print(f"Diarization parameters: {diarization_kwargs}")
+                
+                # Create audio input for diarization (optimisé GPU)
+                import torchaudio
+                waveform = torch.from_numpy(audio).unsqueeze(0)
                 
                 # 🚀 S'assurer que l'audio est sur le bon device
                 if device == "cuda":
@@ -447,6 +345,8 @@ async def process_transcription(
                 
                 # Convert PyAnnote output to format expected by WhisperX
                 # Créer un DataFrame pandas comme attendu par assign_word_speakers
+                import pandas as pd
+                
                 diarize_data = []
                 for segment, _, speaker in diarize_segments.itertracks(yield_label=True):
                     diarize_data.append({
@@ -493,9 +393,7 @@ async def process_transcription(
                 "model_size": request.model_size,
                 "compute_type": compute_type,
                 "device": device,
-                "batch_size": request.batch_size,
-                "vad_enabled": request.use_vad,
-                "vad_threshold": request.vad_threshold
+                "batch_size": request.batch_size
             }
         )
         
@@ -595,8 +493,7 @@ async def health_check():
             "models_loaded": {
                 "whisper": models['whisper'] is not None,
                 "align": models['align_model'] is not None,
-                "diarize": models['diarize_model'] is not None,
-                "vad": models['vad_helper'] is not None and models['vad_helper'].model is not None
+                "diarize": models['diarize_model'] is not None
             }
         }
     except Exception as e:
@@ -630,57 +527,10 @@ async def transcribe_endpoint(request: TranscriptionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
-@app.post("/compare_vad")
-async def compare_vad_endpoint(request: TranscriptionRequest):
-    """
-    Endpoint pour comparer avec/sans VAD - utile pour tester l'amélioration
-    """
-    try:
-        # Download audio
-        audio_data = await download_audio_file(request.audio_url)
-        
-        # Setup processing
-        device, compute_type_default = setup_models()
-        compute_type = request.compute_type if request.compute_type else compute_type_default
-        
-        # Test sans VAD
-        request_no_vad = request.copy()
-        request_no_vad.use_vad = False
-        result_no_vad = await process_transcription(audio_data, request_no_vad, device, compute_type)
-        
-        # Test avec VAD
-        request_with_vad = request.copy()
-        request_with_vad.use_vad = True
-        result_with_vad = await process_transcription(audio_data, request_with_vad, device, compute_type)
-        
-        return {
-            "without_vad": {
-                "speakers_detected": len(set([seg.get('speaker') for seg in result_no_vad.segments if seg.get('speaker')])),
-                "segments_count": len(result_no_vad.segments),
-                "processing_time": result_no_vad.processing_time,
-                "text_sample": result_no_vad.text[:200] + "..." if len(result_no_vad.text) > 200 else result_no_vad.text
-            },
-            "with_vad": {
-                "speakers_detected": len(set([seg.get('speaker') for seg in result_with_vad.segments if seg.get('speaker')])),
-                "segments_count": len(result_with_vad.segments),
-                "processing_time": result_with_vad.processing_time,
-                "text_sample": result_with_vad.text[:200] + "..." if len(result_with_vad.text) > 200 else result_with_vad.text
-            },
-            "improvement": {
-                "vad_enabled": request_with_vad.use_vad,
-                "vad_threshold": request_with_vad.vad_threshold,
-                "processing_time_diff": result_with_vad.processing_time - result_no_vad.processing_time,
-                "speakers_diff": len(set([seg.get('speaker') for seg in result_with_vad.segments if seg.get('speaker')])) - len(set([seg.get('speaker') for seg in result_no_vad.segments if seg.get('speaker')]))
-            }
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Comparison failed: {str(e)}")
-
 if __name__ == "__main__":
     # Initialize models on startup
     device, compute_type = setup_models()
-    print(f"WhisperX service with Silero VAD initialized on {device}")
+    print(f"WhisperX service initialized on {device}")
     
     # Start RunPod serverless handler
     print("Starting RunPod serverless handler...")
