@@ -183,6 +183,9 @@ async def process_transcription(
     start_time = datetime.now()
     temp_file_path = None
     
+    # Debug log pour vérifier que le code est à jour
+    print(f"🔧 DEBUG: Processing transcription with diarization={request.enable_diarization}, token_present={bool(request.hf_token)}")
+    
     try:
         # Save audio data to temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix='.audio') as temp_file:
