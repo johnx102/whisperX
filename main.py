@@ -310,6 +310,13 @@ async def process_transcription(
                     models['diarize_model'] = diarize_model
                     models['diarize_model_name'] = diarization_model
                     print(f"✅ Diarization model loaded on {device}")
+                print("🎯 Applying overlap-optimized diarization...")
+                try:
+                    models['diarize_model'].segmentation_threshold = 0.3  # Plus sensible
+                    models['diarize_model'].clustering_threshold = 0.6    # Plus strict
+                    print("✅ Applied anti-overlap parameters")
+                except AttributeError:
+                    print("ℹ️ Could not access threshold parameters, using defaults")
                 
                 # Prepare parameters for diarization
                 diarization_kwargs = {}
