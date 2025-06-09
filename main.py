@@ -285,19 +285,10 @@ async def process_transcription(
                     **diarization_params
                 )
                 
-                # Convertir le résultat pyannote en format WhisperX
-                diarize_segments = []
-                for segment, _, speaker in diarization_result.itertracks(yield_label=True):
-                    diarize_segments.append({
-                        'start': segment.start,
-                        'end': segment.end,
-                        'speaker': speaker
-                    })
+                print(f"Found {len(list(diarization_result.itertracks()))} speaker segments")
                 
-                print(f"Found {len(diarize_segments)} speaker segments")
-                
-                # Assigner les speakers aux segments WhisperX
-                result = whisperx.assign_word_speakers(diarize_segments, result)
+                # Utiliser directement l'objet pyannote pour assign_word_speakers
+                result = whisperx.assign_word_speakers(diarization_result, result)
                 print("Diarization completed successfully")
             except Exception as e:
                 print(f"Diarization failed: {str(e)}")
