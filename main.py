@@ -249,9 +249,11 @@ async def process_transcription(
                 print("Starting speaker diarization...")
                 
                 # Load diarization model exactly as in WhisperX docs
-                if models['diarize_model'] is None:
+                diarization_model = request.diarization_model or "pyannote/speaker-diarization-3.1"
+                model_key = f"diarize_{diarization_model.replace('/', '_')}"
+                
+                if models['diarize_model'] is None or models.get('diarize_model_name') != diarization_model:
                     from pyannote.audio import Pipeline
-                    diarization_model = request.diarization_model or "pyannote/speaker-diarization-3.1"
                     print(f"Loading diarization model: {diarization_model}")
                     
                     diarize_model = Pipeline.from_pretrained(
@@ -259,6 +261,7 @@ async def process_transcription(
                         use_auth_token=hf_token
                     )
                     models['diarize_model'] = diarize_model
+                    models['diarize_model_name'] = diarization_model
                 
                 # Prepare parameters for diarization
                 diarization_kwargs = {}
@@ -281,12 +284,31 @@ async def process_transcription(
                     **diarization_kwargs
                 )
                 
-                print("Diarization completed. Assigning speakers to words...")
+                print("Diarization completed. Converting format for WhisperX...")
                 
-                # Assign speakers to words using WhisperX function
-                result = whisperx.assign_word_speakers(diarize_segments, result)
+                # Convert PyAnnote output to format expected by WhisperX
+                # Créer un DataFrame pandas comme attendu par assign_word_speakers
+                import pandas as pd
                 
-                print("Speaker diarization completed successfully!")
+                diarize_data = []
+                for segment, _, speaker in diarize_segments.itertracks(yield_label=True):
+                    diarize_data.append({
+                        'start': segment.start,
+                        'end': segment.end,
+                        'speaker': speaker
+                    })
+                
+                if diarize_data:
+                    diarize_df = pd.DataFrame(diarize_data)
+                    print(f"Created diarization DataFrame with {len(diarize_df)} segments")
+                    
+                    # Assigner les speakers aux segments/mots
+                    print("Assigning speakers to words...")
+                    result = whisperx.assign_word_speakers(diarize_df, result)
+                    
+                    print("Speaker diarization completed successfully!")
+                else:
+                    print("⚠️  No diarization segments found")
                 
             except Exception as e:
                 print(f"Diarization failed: {str(e)}")
