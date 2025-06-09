@@ -82,6 +82,22 @@ def setup_models():
     
     try:
         print(f"Setting up models on device: {device}")
+        
+        # 🚀 Optimisations GPU si disponible
+        if device == "cuda":
+            print(f"🎯 GPU Optimizations enabled:")
+            print(f"   - GPU Name: {torch.cuda.get_device_name()}")
+            print(f"   - GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB")
+            print(f"   - CUDA Version: {torch.version.cuda}")
+            
+            # Activer les optimisations GPU
+            torch.backends.cudnn.benchmark = True  # Optimise les convolutions
+            torch.backends.cuda.matmul.allow_tf32 = True  # TF32 pour plus de vitesse
+            torch.backends.cudnn.allow_tf32 = True
+            
+            # Nettoyer la mémoire GPU au démarrage
+            torch.cuda.empty_cache()
+            
         return device, compute_type
     except Exception as e:
         print(f"Error setting up models: {str(e)}")
@@ -159,12 +175,22 @@ def load_whisper_model(model_size: str, device: str, compute_type: str):
         raise
 
 def cleanup_gpu_memory():
-    """Clean up GPU memory"""
+    """Clean up GPU memory aggressively"""
     try:
+        # 🚀 Nettoyage GPU optimisé
+        import gc
         gc.collect()
+        
         if torch.cuda.is_available():
+            # Vider tous les caches GPU
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            
+            # Stats mémoire pour debug
+            allocated = torch.cuda.memory_allocated() / 1e9
+            cached = torch.cuda.memory_reserved() / 1e9
+            print(f"🧹 GPU Memory: {allocated:.1f}GB allocated, {cached:.1f}GB cached")
+            
     except Exception as e:
         print(f"Error during GPU cleanup: {str(e)}")
 
@@ -199,9 +225,23 @@ async def process_transcription(
         
         # Transcribe
         print("Starting transcription...")
+        
+        # 🚀 Optimiser batch_size selon GPU disponible
+        if device == "cuda":
+            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+            if gpu_memory_gb >= 24:  # A100/H100
+                optimal_batch = min(request.batch_size, 32)
+            elif gpu_memory_gb >= 16:  # V100/A10
+                optimal_batch = min(request.batch_size, 24)
+            else:  # T4 et autres
+                optimal_batch = min(request.batch_size, 16)
+            print(f"🎯 Optimized batch size: {optimal_batch} (GPU: {gpu_memory_gb:.1f}GB)")
+        else:
+            optimal_batch = 8  # CPU fallback
+        
         transcribe_params = {
             'audio': audio,
-            'batch_size': request.batch_size
+            'batch_size': optimal_batch
         }
         
         # Add language parameter if specified (and not auto)
@@ -260,8 +300,11 @@ async def process_transcription(
                         diarization_model, 
                         use_auth_token=hf_token
                     )
+                    # 🚀 IMPORTANT: Forcer l'utilisation du GPU
+                    diarize_model.to(torch.device(device))
                     models['diarize_model'] = diarize_model
                     models['diarize_model_name'] = diarization_model
+                    print(f"✅ Diarization model loaded on {device}")
                 
                 # Prepare parameters for diarization
                 diarization_kwargs = {}
@@ -274,9 +317,14 @@ async def process_transcription(
                 
                 print(f"Diarization parameters: {diarization_kwargs}")
                 
-                # Create audio input for diarization
+                # Create audio input for diarization (optimisé GPU)
                 import torchaudio
                 waveform = torch.from_numpy(audio).unsqueeze(0)
+                
+                # 🚀 S'assurer que l'audio est sur le bon device
+                if device == "cuda":
+                    waveform = waveform.to(device)
+                    print(f"✅ Audio tensor moved to {device}")
                 
                 # Perform diarization 
                 diarize_segments = models['diarize_model'](
