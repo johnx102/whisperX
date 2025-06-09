@@ -229,12 +229,17 @@ async def process_transcription(
         # 🚀 Optimiser batch_size selon GPU disponible
         if device == "cuda":
             gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-            if gpu_memory_gb >= 24:  # A100/H100
+            if gpu_memory_gb >= 24:  # A100/H100/A5000
                 optimal_batch = min(request.batch_size, 32)
             elif gpu_memory_gb >= 16:  # V100/A10
                 optimal_batch = min(request.batch_size, 24)
             else:  # T4 et autres
                 optimal_batch = min(request.batch_size, 16)
+            
+            # 🔥 Suggestion d'optimisation si batch_size trop petit
+            if request.batch_size < optimal_batch:
+                print(f"💡 Tip: You could use batch_size up to {32 if gpu_memory_gb >= 24 else 24} for better performance on your {gpu_memory_gb:.1f}GB GPU")
+            
             print(f"🎯 Optimized batch size: {optimal_batch} (GPU: {gpu_memory_gb:.1f}GB)")
         else:
             optimal_batch = 8  # CPU fallback
@@ -325,6 +330,10 @@ async def process_transcription(
                 if device == "cuda":
                     waveform = waveform.to(device)
                     print(f"✅ Audio tensor moved to {device}")
+                    
+                    # 🔥 Re-forcer TF32 car PyAnnote le désactive parfois
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                    torch.backends.cudnn.allow_tf32 = True
                 
                 # Perform diarization 
                 diarize_segments = models['diarize_model'](
