@@ -243,45 +243,50 @@ async def process_transcription(
                 print(f"Alignment failed: {str(e)}")
                 # Continue without alignment
         
-        # Speaker diarization using WhisperX native integration
+        # Speaker diarization using exact WhisperX example approach
         if request.enable_diarization and hf_token:
             try:
-                print("Performing speaker diarization with WhisperX native integration...")
+                print("Starting speaker diarization...")
                 
-                # Load diarization model if not already loaded
+                # Load diarization model exactly as in WhisperX docs
                 if models['diarize_model'] is None:
+                    from pyannote.audio import Pipeline
                     diarization_model = request.diarization_model or "pyannote/speaker-diarization-3.1"
                     print(f"Loading diarization model: {diarization_model}")
                     
-                    diarize_model = whisperx.DiarizationPipeline(
-                        use_auth_token=hf_token,
-                        device=device
+                    diarize_model = Pipeline.from_pretrained(
+                        diarization_model, 
+                        use_auth_token=hf_token
                     )
                     models['diarize_model'] = diarize_model
                 
-                # Prepare diarization parameters
-                diarization_params = {}
+                # Prepare parameters for diarization
+                diarization_kwargs = {}
                 if request.min_speakers is not None:
-                    diarization_params['min_speakers'] = request.min_speakers
+                    diarization_kwargs['min_speakers'] = request.min_speakers
                 if request.max_speakers is not None:
-                    diarization_params['max_speakers'] = request.max_speakers
+                    diarization_kwargs['max_speakers'] = request.max_speakers
                 if request.num_speakers is not None:
-                    diarization_params['num_speakers'] = request.num_speakers
+                    diarization_kwargs['num_speakers'] = request.num_speakers
                 
-                print(f"Diarization parameters: {diarization_params}")
+                print(f"Diarization parameters: {diarization_kwargs}")
                 
-                # Perform diarization using WhisperX native method
+                # Create audio input for diarization
+                import torchaudio
+                waveform = torch.from_numpy(audio).unsqueeze(0)
+                
+                # Perform diarization 
                 diarize_segments = models['diarize_model'](
-                    audio, 
-                    **diarization_params
+                    {"waveform": waveform, "sample_rate": 16000},
+                    **diarization_kwargs
                 )
                 
-                print(f"Diarization completed. Found segments with speakers.")
+                print("Diarization completed. Assigning speakers to words...")
                 
-                # Assign speakers to segments using WhisperX native method
+                # Assign speakers to words using WhisperX function
                 result = whisperx.assign_word_speakers(diarize_segments, result)
                 
-                print("Speaker assignment completed successfully")
+                print("Speaker diarization completed successfully!")
                 
             except Exception as e:
                 print(f"Diarization failed: {str(e)}")
