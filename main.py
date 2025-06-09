@@ -255,10 +255,13 @@ async def process_transcription(
             try:
                 print("Performing speaker diarization...")
                 if models['diarize_model'] is None:
-                    diarize_model = whisperx.DiarizationPipeline(
-                        use_auth_token=hf_token, 
-                        device=device
+                    # Nouvelle API WhisperX pour la diarisation
+                    from pyannote.audio import Pipeline
+                    diarize_model = Pipeline.from_pretrained(
+                        "pyannote/speaker-diarization-3.1",
+                        use_auth_token=hf_token
                     )
+                    diarize_model.to(torch.device(device))
                     models['diarize_model'] = diarize_model
                 
                 # Prepare diarization parameters
@@ -274,11 +277,20 @@ async def process_transcription(
                     print(f"Num speakers set to: {request.num_speakers}")
                 
                 print(f"Diarization parameters: {diarization_params}")
-                diarize_segments = models['diarize_model'](audio, **diarization_params)
+                
+                # Effectuer la diarisation
+                waveform = torch.from_numpy(audio).unsqueeze(0)
+                diarize_segments = models['diarize_model'](
+                    {"waveform": waveform, "sample_rate": 16000},
+                    **diarization_params
+                )
+                
+                # Assigner les speakers aux segments WhisperX
                 result = whisperx.assign_word_speakers(diarize_segments, result)
                 print("Diarization completed successfully")
             except Exception as e:
                 print(f"Diarization failed: {str(e)}")
+                print(f"Diarization error details: {traceback.format_exc()}")
                 # Continue without diarization
         elif request.enable_diarization and not hf_token:
             print("⚠️  Diarization requested but no HF_TOKEN found in environment or request")
