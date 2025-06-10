@@ -305,26 +305,17 @@ async def process_transcription(
                         diarization_model, 
                         use_auth_token=hf_token
                     )
-                                        # Configurer les paramètres AVANT utilisation
-                    try:
-                        # Paramètres anti-chevauchement
-                        diarize_model.segmentation_threshold = 0.2      # Plus sensible
-                        diarize_model.clustering_threshold = 0.6        # Plus strict
-                        print("✅ Applied segmentation and clustering thresholds")
-                        
-                        # Méthode clustering si accessible
-                        if hasattr(diarize_model, '_clustering') and hasattr(diarize_model._clustering, 'method'):
-                            diarize_model._clustering.method = "complete"
-                            print("✅ Applied complete clustering method")
-                        
-                    except Exception as e:
-                        print(f"⚠️ Could not set all parameters: {e}")
-                    # 🚀 IMPORTANT: Forcer l'utilisation du GPU
                     diarize_model.to(torch.device(device))
                     models['diarize_model'] = diarize_model
                     models['diarize_model_name'] = diarization_model
                     print(f"✅ Diarization model loaded on {device}")
-
+                print("🎯 Applying overlap-optimized diarization...")
+                try:
+                    models['diarize_model'].segmentation_threshold = 0.3 # Plus sensible
+                    models['diarize_model'].clustering_threshold = 0.7   # Plus strict
+                    print("✅ Applied anti-overlap parameters")
+                except AttributeError:
+                    print("ℹ️ Could not access threshold parameters, using defaults")
                 # Prepare parameters for diarization
                 diarization_kwargs = {}
                 if request.min_speakers is not None:
