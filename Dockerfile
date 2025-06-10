@@ -48,13 +48,9 @@ RUN pip install --no-cache-dir \
     uvicorn \
     aiohttp \
     aiofiles \
-    nemo_toolkit[asr] \
-    librosa \
-    soundfile \
-    omegaconf \
-    hydra-core \
     pydantic
 
+RUN pip install --no-cache-dir nemo_toolkit[asr] 
 # Install WhisperX from source
 RUN pip install --no-cache-dir git+https://github.com/m-bain/whisperx.git
 
