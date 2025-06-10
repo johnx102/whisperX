@@ -50,6 +50,10 @@ RUN pip install --no-cache-dir \
     aiofiles \
     pydantic
 
+RUN pip install "numpy>=1.21.0,<2.2.0"
+
+# 2. Ensuite Numba compatible avec cette version NumPy
+RUN pip install "numba>=0.56.0,<0.61.0"
 RUN pip install --no-cache-dir nemo_toolkit['all']
 # Install WhisperX from source
 RUN pip install --no-cache-dir git+https://github.com/m-bain/whisperx.git
