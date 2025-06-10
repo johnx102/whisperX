@@ -52,7 +52,7 @@ RUN pip install --no-cache-dir \
     librosa \
     soundfile \
     omegaconf \
-    hydra-core
+    hydra-core \
     pydantic
 
 # Install WhisperX from source
