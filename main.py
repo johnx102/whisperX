@@ -314,7 +314,6 @@ async def process_transcription(
                 try:
                     models['diarize_model'].segmentation_threshold = 0.2  # Plus sensible
                     models['diarize_model'].clustering_threshold = 0.5    # Plus strict
-                    models['diarize_model']._clustering.method = "complete"  # Clustering plus strict
                     print("✅ Applied anti-overlap parameters")
                 except AttributeError:
                     print("ℹ️ Could not access threshold parameters, using defaults")
