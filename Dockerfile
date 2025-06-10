@@ -50,7 +50,7 @@ RUN pip install --no-cache-dir \
     aiofiles \
     pydantic
 
-RUN pip install --no-cache-dir nemo_toolkit[ALL]
+RUN pip install --no-cache-dir nemo_toolkit[all]
 # Install WhisperX from source
 RUN pip install --no-cache-dir git+https://github.com/m-bain/whisperx.git
 
