@@ -18,7 +18,7 @@ from pydantic import BaseModel, HttpUrl, validator
 import uvicorn
 
 # Initialize FastAPI app for health checks and development
-app = FastAPI(title="WhisperX Transcription Service with NeMo", version="1.0.0")
+app = FastAPI(title="WhisperX Transcription Service", version="1.0.0")
 
 # Configuration
 MAX_FILE_SIZE = 300 * 1024 * 1024  # 300MB
@@ -34,40 +34,8 @@ models = {
     'whisper': None,
     'align_model': None,
     'align_metadata': None,
-    'nemo_diarizer': None,  # NOUVEAU: NeMo diarizer
-    'nemo_speaker_model': None,  # NOUVEAU: NeMo speaker embeddings
-    'pyannote_model': None  # Pyannote fallback
+    'diarize_model': None
 }
-
-# Test NeMo availability at startup
-def test_nemo_availability():
-    """Test if NeMo is properly installed"""
-    try:
-        print("🔍 Testing NeMo installation...")
-        
-        # Test des imports critiques
-        from nemo.collections.asr.models import ClusteringDiarizer
-        from nemo.collections.asr.models import EncDecSpeakerLabelModel
-        from omegaconf import OmegaConf
-        
-        print("✅ NeMo imports successful")
-        
-        # Test de création d'un objet basique
-        config = OmegaConf.create({'test': True})
-        print("✅ OmegaConf working")
-        
-        return True
-        
-    except ImportError as e:
-        print(f"❌ NeMo import failed: {e}")
-        print("💡 Install with: pip install nemo_toolkit[asr]")
-        return False
-    except Exception as e:
-        print(f"❌ NeMo setup failed: {e}")
-        return False
-
-# Test global à l'initialisation
-NEMO_AVAILABLE = test_nemo_availability()
 
 class TranscriptionRequest(BaseModel):
     audio_url: HttpUrl
@@ -79,11 +47,7 @@ class TranscriptionRequest(BaseModel):
     min_speakers: Optional[int] = None
     max_speakers: Optional[int] = None
     num_speakers: Optional[int] = None
-    # NOUVEAU: Choix du moteur de diarisation
-    diarization_engine: Optional[str] = "nemo"  # "nemo" ou "pyannote"
-    # Paramètres NeMo spécifiques
-    nemo_model: Optional[str] = "nvidia/speakerdiarization_msdd_telephonic"
-    oracle_vad: Optional[bool] = False  # Utiliser VAD perfect pour NeMo
+    diarization_model: Optional[str] = "pyannote/speaker-diarization-3.1"
     return_char_alignments: Optional[bool] = False
     hf_token: Optional[str] = None
     
@@ -99,13 +63,6 @@ class TranscriptionRequest(BaseModel):
         valid_types = ['float16', 'int8', 'float32']
         if v not in valid_types:
             raise ValueError(f'Compute type must be one of: {", ".join(valid_types)}')
-        return v
-    
-    @validator('diarization_engine')
-    def validate_diarization_engine(cls, v):
-        valid_engines = ['nemo', 'pyannote']
-        if v not in valid_engines:
-            raise ValueError(f'Diarization engine must be one of: {", ".join(valid_engines)}')
         return v
 
 class TranscriptionResponse(BaseModel):
@@ -140,8 +97,7 @@ def setup_models():
             
             # Nettoyer la mémoire GPU au démarrage
             torch.cuda.empty_cache()
-        
-        print(f"🔍 NeMo Status: {'Available' if NEMO_AVAILABLE else 'Not Available'}")
+            
         return device, compute_type
     except Exception as e:
         print(f"Error setting up models: {str(e)}")
@@ -218,288 +174,6 @@ def load_whisper_model(model_size: str, device: str, compute_type: str):
         print(f"Error loading model {model_size}: {str(e)}")
         raise
 
-def load_nemo_diarizer(model_name: str, device: str):
-    """Load NeMo diarization model avec gestion d'erreur améliorée"""
-    global models
-    
-    try:
-        print(f"🔊 Loading NeMo diarization model: {model_name}")
-        
-        # Vérification préalable
-        if not NEMO_AVAILABLE:
-            print("❌ NeMo not available during load_nemo_diarizer")
-            return None
-        
-        # Import NeMo avec gestion d'erreur détaillée
-        try:
-            from nemo.collections.asr.models import ClusteringDiarizer
-            print("✅ NeMo ClusteringDiarizer import successful")
-        except ImportError as e:
-            print(f"❌ Failed to import ClusteringDiarizer: {e}")
-            return None
-        except Exception as e:
-            print(f"❌ Unexpected error importing NeMo: {e}")
-            return None
-        
-        # Charger le modèle NeMo
-        try:
-            print(f"🔄 Attempting to load model: {model_name}")
-            nemo_model = ClusteringDiarizer.from_pretrained(model_name)
-            print("✅ Model loaded successfully")
-        except Exception as e:
-            print(f"❌ Failed to load NeMo model {model_name}: {e}")
-            # Essayer un modèle alternatif
-            try:
-                print("🔄 Trying alternative NeMo model...")
-                alternative_model = "nvidia/speakerverification_en_titanet_large"
-                nemo_model = ClusteringDiarizer.from_pretrained(alternative_model)
-                print(f"✅ Alternative model loaded: {alternative_model}")
-            except Exception as e2:
-                print(f"❌ Alternative model also failed: {e2}")
-                return None
-        
-        # Configurer pour GPU si disponible
-        try:
-            if device == "cuda" and torch.cuda.is_available():
-                nemo_model = nemo_model.to(device)
-                print(f"✅ NeMo diarizer moved to {device}")
-            else:
-                print(f"✅ NeMo diarizer on CPU")
-        except Exception as e:
-            print(f"⚠️ Could not move to {device}: {e}")
-        
-        models['nemo_diarizer'] = nemo_model
-        return nemo_model
-        
-    except Exception as e:
-        print(f"❌ Unexpected error in load_nemo_diarizer: {e}")
-        print(f"❌ Traceback: {traceback.format_exc()}")
-        return None
-
-def simple_nemo_diarize(audio_path: str, request: TranscriptionRequest, device: str):
-    """Version simplifiée de la diarisation NeMo"""
-    try:
-        if not NEMO_AVAILABLE:
-            print("❌ NeMo not available for diarization")
-            return []
-        
-        print("🔊 Starting simplified NeMo diarization...")
-        
-        # Import des modules nécessaires
-        from nemo.collections.asr.models import ClusteringDiarizer
-        from omegaconf import OmegaConf
-        import librosa
-        import soundfile as sf
-        
-        # Créer un diarizeur simple
-        print("🔄 Creating NeMo diarizer...")
-        try:
-            # Essayons avec un modèle simple
-            diarizer = ClusteringDiarizer.from_pretrained("nvidia/speakerverification_en_titanet_large")
-            print("✅ NeMo diarizer created")
-        except Exception as e:
-            print(f"❌ Failed to create diarizer: {e}")
-            return []
-        
-        # Préparer l'audio
-        print("🎵 Preparing audio...")
-        audio_data, sr = librosa.load(audio_path, sr=16000)
-        wav_path = audio_path.replace('.audio', '.wav')
-        sf.write(wav_path, audio_data, 16000)
-        
-        # Configuration minimale
-        manifest_path = '/tmp/simple_manifest.json'
-        manifest_data = {
-            'audio_filepath': wav_path,
-            'offset': 0,
-            'duration': len(audio_data) / 16000,
-            'label': 'infer',
-            'text': '-'
-        }
-        
-        with open(manifest_path, 'w') as f:
-            json.dump(manifest_data, f)
-        
-        # Configuration simple
-        config = OmegaConf.create({
-            'diarizer': {
-                'manifest_filepath': manifest_path,
-                'out_dir': '/tmp/nemo_outputs',
-                'clustering': {
-                    'parameters': {
-                        'max_num_speakers': request.max_speakers or 8
-                    }
-                }
-            }
-        })
-        
-        # Effectuer la diarisation
-        print("🎯 Running simple NeMo diarization...")
-        diarizer.diarize(cfg=config)
-        
-        # Nettoyer
-        try:
-            os.unlink(wav_path)
-            os.unlink(manifest_path)
-        except:
-            pass
-        
-        print("✅ Simple NeMo diarization completed")
-        return [{"start": 0, "end": len(audio_data) / 16000, "speaker": "SPEAKER_0"}]
-        
-    except Exception as e:
-        print(f"❌ Simple NeMo diarization failed: {e}")
-        print(f"Details: {traceback.format_exc()}")
-        return []
-
-def nemo_diarize_audio(audio_path: str, request: TranscriptionRequest, device: str):
-    """Effectue la diarisation avec NeMo - version robuste"""
-    try:
-        print("🔊 Starting NeMo diarization...")
-        
-        # Vérification NeMo
-        if not NEMO_AVAILABLE:
-            print("❌ NeMo not available - falling back to simple segments")
-            # Retourner des segments basiques
-            import librosa
-            audio_data, sr = librosa.load(audio_path, sr=16000)
-            duration = len(audio_data) / sr
-            return [{"start": 0, "end": duration, "speaker": "SPEAKER_0"}]
-        
-        # Charger le modèle NeMo si nécessaire
-        if models['nemo_diarizer'] is None:
-            print("🔄 Loading NeMo diarizer...")
-            models['nemo_diarizer'] = load_nemo_diarizer(request.nemo_model, device)
-        
-        if models['nemo_diarizer'] is None:
-            print("❌ Could not load NeMo diarizer - trying simple approach")
-            return simple_nemo_diarize(audio_path, request, device)
-        
-        # Configuration NeMo complète
-        from omegaconf import OmegaConf
-        import librosa
-        import soundfile as sf
-        
-        # Préparer l'audio
-        audio_data, sr = librosa.load(audio_path, sr=16000)
-        wav_path = audio_path.replace('.audio', '.wav')
-        sf.write(wav_path, audio_data, 16000)
-        
-        # Configuration de base pour la diarisation
-        config = OmegaConf.create({
-            'diarizer': {
-                'manifest_filepath': 'temp_manifest.json',
-                'out_dir': '/tmp/nemo_outputs',
-                'speaker_embeddings': {
-                    'model_path': 'nvidia/speakerverification_en_titanet_large',
-                    'parameters': {
-                        'window_length_in_sec': 0.5,
-                        'shift_length_in_sec': 0.1,
-                        'multiscale_weights': None,
-                        'save_embeddings': False
-                    }
-                },
-                'clustering': {
-                    'parameters': {
-                        'oracle_num_speakers': request.num_speakers,
-                        'max_num_speakers': request.max_speakers or 8,
-                        'enhanced_count_thres': 40,
-                        'max_rp_threshold': 0.25,
-                        'sparse_search_volume': 30
-                    }
-                },
-                'vad': {
-                    'model_path': 'nvidia/vad_multilingual_marblenet',
-                    'parameters': {
-                        'window_length_in_sec': 0.15,
-                        'shift_length_in_sec': 0.01,
-                        'smoothing': 'median',
-                        'overlap': 0.875,
-                        'onset': 0.8,
-                        'offset': 0.6,
-                        'pad_onset': 0.05,
-                        'pad_offset': -0.1,
-                        'min_duration_on': 0.2,
-                        'min_duration_off': 0.2
-                    }
-                }
-            }
-        })
-        
-        # Créer manifest temporaire
-        manifest_path = '/tmp/nemo_manifest.json'
-        manifest_data = {
-            'audio_filepath': wav_path,
-            'offset': 0,
-            'duration': len(audio_data) / 16000,
-            'label': 'infer',
-            'text': '-',
-            'num_speakers': request.num_speakers,
-            'rttm_filepath': None,
-            'uem_filepath': None
-        }
-        
-        with open(manifest_path, 'w') as f:
-            json.dump(manifest_data, f)
-            
-        # Mettre à jour la config avec le bon manifest
-        config.diarizer.manifest_filepath = manifest_path
-        
-        # Effectuer la diarisation
-        print("🎯 Running NeMo diarization...")
-        models['nemo_diarizer'].diarize(cfg=config)
-        
-        # Lire les résultats
-        rttm_output_path = f"{config.diarizer.out_dir}/pred_rttms/{os.path.basename(wav_path).replace('.wav', '.rttm')}"
-        
-        segments = []
-        if os.path.exists(rttm_output_path):
-            with open(rttm_output_path, 'r') as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) >= 8 and parts[0] == 'SPEAKER':
-                        start_time = float(parts[3])
-                        duration = float(parts[4])
-                        end_time = start_time + duration
-                        speaker_id = parts[7]
-                        
-                        segments.append({
-                            'start': start_time,
-                            'end': end_time,
-                            'speaker': f"SPEAKER_{speaker_id}"
-                        })
-        
-        # Si pas de segments, fallback
-        if not segments:
-            print("⚠️ No RTTM segments found, creating fallback")
-            duration = len(audio_data) / sr
-            segments = [{"start": 0, "end": duration, "speaker": "SPEAKER_0"}]
-        
-        # Nettoyer les fichiers temporaires
-        try:
-            os.unlink(wav_path)
-            os.unlink(manifest_path)
-            if os.path.exists(rttm_output_path):
-                os.unlink(rttm_output_path)
-        except:
-            pass
-        
-        print(f"✅ NeMo diarization completed: {len(segments)} segments")
-        return segments
-        
-    except Exception as e:
-        print(f"❌ NeMo diarization failed: {e}")
-        print(f"Details: {traceback.format_exc()}")
-        
-        # Fallback ultime
-        try:
-            import librosa
-            audio_data, sr = librosa.load(audio_path, sr=16000)
-            duration = len(audio_data) / sr
-            return [{"start": 0, "end": duration, "speaker": "SPEAKER_0"}]
-        except:
-            return []
-
 def cleanup_gpu_memory():
     """Clean up GPU memory aggressively"""
     try:
@@ -526,13 +200,14 @@ async def process_transcription(
     device: str,
     compute_type: str
 ) -> TranscriptionResponse:
-    """Process audio transcription with WhisperX + NeMo diarization"""
+    """Process audio transcription with WhisperX"""
     
     start_time = datetime.now()
     temp_file_path = None
     
-    print(f"🔧 DEBUG: Processing with diarization={request.enable_diarization}, engine={request.diarization_engine}")
-    print(f"🔧 NeMo Status: {'Available' if NEMO_AVAILABLE else 'Not Available'}")
+    # Récupérer le token HF
+    hf_token = request.hf_token or os.getenv('HF_TOKEN')
+    print(f"🔧 DEBUG: Processing transcription with diarization={request.enable_diarization}, token_present={bool(hf_token)}")
     
     try:
         # Save audio data to temporary file
@@ -560,6 +235,10 @@ async def process_transcription(
                 optimal_batch = min(request.batch_size, 24)
             else:  # T4 et autres
                 optimal_batch = min(request.batch_size, 16)
+            
+            # 🔥 Suggestion d'optimisation si batch_size trop petit
+            if request.batch_size < optimal_batch:
+                print(f"💡 Tip: You could use batch_size up to {32 if gpu_memory_gb >= 24 else 24} for better performance on your {gpu_memory_gb:.1f}GB GPU")
             
             print(f"🎯 Optimized batch size: {optimal_batch} (GPU: {gpu_memory_gb:.1f}GB)")
         else:
@@ -609,84 +288,96 @@ async def process_transcription(
                 print(f"Alignment failed: {str(e)}")
                 # Continue without alignment
         
-        # Speaker diarization
-        if request.enable_diarization:
+        # Speaker diarization using exact WhisperX example approach
+        if request.enable_diarization and hf_token:
             try:
-                if request.diarization_engine == "nemo":
-                    print("🔊 Starting NeMo diarization...")
-                    
-                    # Diarisation avec NeMo
-                    diarize_segments = nemo_diarize_audio(temp_file_path, request, device)
-                    
-                    if diarize_segments:
-                        # Convertir au format DataFrame pour WhisperX
-                        import pandas as pd
-                        diarize_df = pd.DataFrame(diarize_segments)
-                        print(f"✅ NeMo diarization: {len(diarize_df)} segments")
-                        
-                        # Assigner les speakers aux mots
-                        print("Assigning speakers to words...")
-                        result = whisperx.assign_word_speakers(diarize_df, result)
-                        print("✅ NeMo speaker diarization completed successfully!")
-                    else:
-                        print("⚠️ No diarization segments found with NeMo")
+                print("Starting speaker diarization...")
                 
-                elif request.diarization_engine == "pyannote":
-                    # Fallback vers pyannote si demandé
-                    print("🎭 Using pyannote fallback...")
-                    hf_token = request.hf_token or os.getenv('HF_TOKEN')
+                # Load diarization model exactly as in WhisperX docs
+                diarization_model = request.diarization_model or "pyannote/speaker-diarization-3.1"
+                model_key = f"diarize_{diarization_model.replace('/', '_')}"
+                
+                if models['diarize_model'] is None or models.get('diarize_model_name') != diarization_model:
+                    from pyannote.audio import Pipeline
+                    print(f"Loading diarization model: {diarization_model}")
                     
-                    if not hf_token:
-                        print("❌ Pyannote requires HF_TOKEN")
-                    else:
-                        from pyannote.audio import Pipeline
-                        
-                        # Charger pyannote
-                        if models.get('pyannote_model') is None:
-                            pyannote_model = Pipeline.from_pretrained(
-                                "pyannote/speaker-diarization-3.1",
-                                use_auth_token=hf_token
-                            )
-                            pyannote_model.to(torch.device(device))
-                            models['pyannote_model'] = pyannote_model
-                        
-                        # Diarisation pyannote
-                        import torchaudio
-                        waveform = torch.from_numpy(audio).unsqueeze(0)
-                        if device == "cuda":
-                            waveform = waveform.to(device)
-                        
-                        diarization_kwargs = {}
-                        if request.min_speakers:
-                            diarization_kwargs['min_speakers'] = request.min_speakers
-                        if request.max_speakers:
-                            diarization_kwargs['max_speakers'] = request.max_speakers
-                        if request.num_speakers:
-                            diarization_kwargs['num_speakers'] = request.num_speakers
-                        
-                        diarize_segments = models['pyannote_model'](
-                            {"waveform": waveform, "sample_rate": 16000},
-                            **diarization_kwargs
-                        )
-                        
-                        # Convertir format pyannote
-                        import pandas as pd
-                        diarize_data = []
-                        for segment, _, speaker in diarize_segments.itertracks(yield_label=True):
-                            diarize_data.append({
-                                'start': segment.start,
-                                'end': segment.end,
-                                'speaker': speaker
-                            })
-                        
-                        if diarize_data:
-                            diarize_df = pd.DataFrame(diarize_data)
-                            result = whisperx.assign_word_speakers(diarize_df, result)
-                            print("✅ Pyannote fallback completed successfully!")
+                    diarize_model = Pipeline.from_pretrained(
+                        diarization_model, 
+                        use_auth_token=hf_token
+                    )
+                    diarize_model.to(torch.device(device))
+                    models['diarize_model'] = diarize_model
+                    models['diarize_model_name'] = diarization_model
+                    print(f"✅ Diarization model loaded on {device}")
+                print("🎯 Applying overlap-optimized diarization...")
+                try:
+                    models['diarize_model'].segmentation_threshold = 0.3 # Plus sensible
+                    models['diarize_model'].clustering_threshold = 0.7   # Plus strict
+                    print("✅ Applied anti-overlap parameters")
+                except AttributeError:
+                    print("ℹ️ Could not access threshold parameters, using defaults")
+                # Prepare parameters for diarization
+                diarization_kwargs = {}
+                if request.min_speakers is not None:
+                    diarization_kwargs['min_speakers'] = request.min_speakers
+                if request.max_speakers is not None:
+                    diarization_kwargs['max_speakers'] = request.max_speakers
+                if request.num_speakers is not None:
+                    diarization_kwargs['num_speakers'] = request.num_speakers
+                
+                print(f"Diarization parameters: {diarization_kwargs}")
+                
+                # Create audio input for diarization (optimisé GPU)
+                import torchaudio
+                waveform = torch.from_numpy(audio).unsqueeze(0)
+                
+                # 🚀 S'assurer que l'audio est sur le bon device
+                if device == "cuda":
+                    waveform = waveform.to(device)
+                    print(f"✅ Audio tensor moved to {device}")
+                    
+                    # 🔥 Re-forcer TF32 car PyAnnote le désactive parfois
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                    torch.backends.cudnn.allow_tf32 = True
+                
+                # Perform diarization 
+                diarize_segments = models['diarize_model'](
+                    {"waveform": waveform, "sample_rate": 16000},
+                    **diarization_kwargs
+                )
+                
+                print("Diarization completed. Converting format for WhisperX...")
+                
+                # Convert PyAnnote output to format expected by WhisperX
+                # Créer un DataFrame pandas comme attendu par assign_word_speakers
+                import pandas as pd
+                
+                diarize_data = []
+                for segment, _, speaker in diarize_segments.itertracks(yield_label=True):
+                    diarize_data.append({
+                        'start': segment.start,
+                        'end': segment.end,
+                        'speaker': speaker
+                    })
+                
+                if diarize_data:
+                    diarize_df = pd.DataFrame(diarize_data)
+                    print(f"Created diarization DataFrame with {len(diarize_df)} segments")
+                    
+                    # Assigner les speakers aux segments/mots
+                    print("Assigning speakers to words...")
+                    result = whisperx.assign_word_speakers(diarize_df, result)
+                    
+                    print("Speaker diarization completed successfully!")
+                else:
+                    print("⚠️  No diarization segments found")
                 
             except Exception as e:
-                print(f"❌ Diarization failed: {str(e)}")
-                print(f"Details: {traceback.format_exc()}")
+                print(f"Diarization failed: {str(e)}")
+                print(f"Diarization error details: {traceback.format_exc()}")
+                # Continue without diarization
+        elif request.enable_diarization and not hf_token:
+            print("⚠️  Diarization requested but no HF_TOKEN found in environment or request")
         
         # Extract full text
         if isinstance(result, dict) and 'segments' in result:
@@ -707,10 +398,7 @@ async def process_transcription(
                 "model_size": request.model_size,
                 "compute_type": compute_type,
                 "device": device,
-                "batch_size": request.batch_size,
-                "diarization_engine": request.diarization_engine,
-                "nemo_available": NEMO_AVAILABLE,
-                "nemo_model_loaded": models['nemo_diarizer'] is not None
+                "batch_size": request.batch_size
             }
         )
         
@@ -729,8 +417,7 @@ async def process_transcription(
             model_info={
                 "model_size": request.model_size,
                 "compute_type": compute_type,
-                "device": device,
-                "nemo_available": NEMO_AVAILABLE
+                "device": device
             },
             error=error_msg
         )
@@ -808,21 +495,17 @@ async def health_check():
             "timestamp": datetime.utcnow().isoformat(),
             "device": device,
             "gpu_info": gpu_info,
-            "nemo_available": NEMO_AVAILABLE,
             "models_loaded": {
                 "whisper": models['whisper'] is not None,
                 "align": models['align_model'] is not None,
-                "nemo_diarizer": models['nemo_diarizer'] is not None,
-                "nemo_speaker": models['nemo_speaker_model'] is not None,
-                "pyannote": models['pyannote_model'] is not None
+                "diarize": models['diarize_model'] is not None
             }
         }
     except Exception as e:
         return {
             "status": "unhealthy",
             "error": str(e),
-            "timestamp": datetime.utcnow().isoformat(),
-            "nemo_available": NEMO_AVAILABLE
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 @app.post("/transcribe")
@@ -849,218 +532,10 @@ async def transcribe_endpoint(request: TranscriptionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
-@app.get("/nemo-status")
-async def nemo_status():
-    """Check NeMo installation status"""
-    status = {
-        "nemo_available": NEMO_AVAILABLE,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-    
-    if NEMO_AVAILABLE:
-        try:
-            from nemo.collections.asr.models import ClusteringDiarizer
-            from nemo.collections.asr.models import EncDecSpeakerLabelModel
-            
-            status.update({
-                "clustering_diarizer": "available",
-                "speaker_model": "available",
-                "test_status": "✅ All NeMo components working"
-            })
-        except Exception as e:
-            status.update({
-                "test_status": f"❌ NeMo test failed: {e}",
-                "error": str(e)
-            })
-    else:
-        status.update({
-            "test_status": "❌ NeMo not installed",
-            "install_command": "pip install nemo_toolkit[asr]"
-        })
-    
-    return status
-
-@app.post("/test_nemo")
-async def test_nemo_endpoint(request: TranscriptionRequest):
-    """Test NeMo diarization capabilities"""
-    try:
-        # Vérifier si NeMo est disponible
-        if not NEMO_AVAILABLE:
-            return {
-                "status": "error",
-                "message": "NeMo toolkit not installed",
-                "install_command": "pip install nemo_toolkit[asr]",
-                "nemo_available": False
-            }
-        
-        # Test avec NeMo
-        audio_data = await download_audio_file(request.audio_url)
-        device, compute_type = setup_models()
-        
-        # Forcer NeMo
-        request.diarization_engine = "nemo"
-        request.enable_diarization = True
-        
-        result = await process_transcription(audio_data, request, device, compute_type)
-        
-        return {
-            "status": "success",
-            "message": "NeMo diarization tested successfully",
-            "nemo_available": NEMO_AVAILABLE,
-            "gpu_memory_used": torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0,
-            "result_preview": {
-                "speakers": len(set([seg.get('speaker') for seg in result.segments if seg.get('speaker')])),
-                "segments": len(result.segments),
-                "processing_time": result.processing_time,
-                "engine_used": result.model_info.get('diarization_engine'),
-                "first_segment": result.segments[0] if result.segments else None,
-                "error": result.error
-            }
-        }
-        
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"NeMo test failed: {str(e)}",
-            "nemo_available": NEMO_AVAILABLE,
-            "traceback": traceback.format_exc()
-        }
-
-@app.post("/debug_nemo")
-async def debug_nemo_endpoint():
-    """Debug NeMo installation détaillé"""
-    debug_info = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "nemo_global_status": NEMO_AVAILABLE
-    }
-    
-    # Test des imports un par un
-    imports_test = {}
-    
-    try:
-        import nemo
-        imports_test["nemo_core"] = {"status": "✅", "version": getattr(nemo, '__version__', 'unknown')}
-    except ImportError as e:
-        imports_test["nemo_core"] = {"status": "❌", "error": str(e)}
-    
-    try:
-        from nemo.collections.asr.models import ClusteringDiarizer
-        imports_test["clustering_diarizer"] = {"status": "✅"}
-    except ImportError as e:
-        imports_test["clustering_diarizer"] = {"status": "❌", "error": str(e)}
-    
-    try:
-        from nemo.collections.asr.models import EncDecSpeakerLabelModel
-        imports_test["speaker_model"] = {"status": "✅"}
-    except ImportError as e:
-        imports_test["speaker_model"] = {"status": "❌", "error": str(e)}
-    
-    try:
-        from omegaconf import OmegaConf
-        imports_test["omegaconf"] = {"status": "✅"}
-    except ImportError as e:
-        imports_test["omegaconf"] = {"status": "❌", "error": str(e)}
-    
-    debug_info["imports"] = imports_test
-    
-    # Test de création d'objets
-    objects_test = {}
-    
-    if imports_test.get("clustering_diarizer", {}).get("status") == "✅":
-        try:
-            from nemo.collections.asr.models import ClusteringDiarizer
-            # Test de liste des modèles disponibles
-            objects_test["model_listing"] = {"status": "✅"}
-        except Exception as e:
-            objects_test["model_listing"] = {"status": "❌", "error": str(e)}
-    
-    debug_info["objects"] = objects_test
-    
-    # Informations système
-    debug_info["system"] = {
-        "torch_version": torch.__version__,
-        "cuda_available": torch.cuda.is_available(),
-        "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
-        "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0
-    }
-    
-    return debug_info
-
-@app.post("/compare_engines")
-async def compare_engines_endpoint(request: TranscriptionRequest):
-    """Compare NeMo vs pyannote diarization"""
-    try:
-        audio_data = await download_audio_file(request.audio_url)
-        device, compute_type = setup_models()
-        
-        results = {}
-        
-        # Test NeMo
-        if NEMO_AVAILABLE:
-            try:
-                request_nemo = request.copy()
-                request_nemo.diarization_engine = "nemo"
-                request_nemo.enable_diarization = True
-                
-                result_nemo = await process_transcription(audio_data, request_nemo, device, compute_type)
-                
-                results["nemo"] = {
-                    "speakers_detected": len(set([seg.get('speaker') for seg in result_nemo.segments if seg.get('speaker')])),
-                    "segments_count": len(result_nemo.segments),
-                    "processing_time": result_nemo.processing_time,
-                    "sample_text": result_nemo.text[:200] + "..." if len(result_nemo.text) > 200 else result_nemo.text,
-                    "error": result_nemo.error
-                }
-            except Exception as e:
-                results["nemo"] = {"error": f"NeMo failed: {str(e)}"}
-        else:
-            results["nemo"] = {"error": "NeMo not available"}
-        
-        # Test pyannote
-        try:
-            request_pyannote = request.copy()
-            request_pyannote.diarization_engine = "pyannote"
-            request_pyannote.enable_diarization = True
-            
-            result_pyannote = await process_transcription(audio_data, request_pyannote, device, compute_type)
-            
-            results["pyannote"] = {
-                "speakers_detected": len(set([seg.get('speaker') for seg in result_pyannote.segments if seg.get('speaker')])),
-                "segments_count": len(result_pyannote.segments),
-                "processing_time": result_pyannote.processing_time,
-                "sample_text": result_pyannote.text[:200] + "..." if len(result_pyannote.text) > 200 else result_pyannote.text,
-                "error": result_pyannote.error
-            }
-        except Exception as e:
-            results["pyannote"] = {"error": f"Pyannote failed: {str(e)}"}
-        
-        # Comparaison
-        comparison = {}
-        if "nemo" in results and "pyannote" in results:
-            if not results["nemo"].get("error") and not results["pyannote"].get("error"):
-                comparison = {
-                    "speed_difference": results["nemo"]["processing_time"] - results["pyannote"]["processing_time"],
-                    "speakers_difference": results["nemo"]["speakers_detected"] - results["pyannote"]["speakers_detected"],
-                    "segments_difference": results["nemo"]["segments_count"] - results["pyannote"]["segments_count"],
-                    "winner_speed": "nemo" if results["nemo"]["processing_time"] < results["pyannote"]["processing_time"] else "pyannote",
-                    "nemo_faster_by": abs(results["nemo"]["processing_time"] - results["pyannote"]["processing_time"]) if results["nemo"]["processing_time"] < results["pyannote"]["processing_time"] else 0
-                }
-        
-        return {
-            "results": results,
-            "comparison": comparison,
-            "nemo_available": NEMO_AVAILABLE,
-            "gpu_memory_used": torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Comparison failed: {str(e)}")
-
 if __name__ == "__main__":
     # Initialize models on startup
     device, compute_type = setup_models()
-    print(f"WhisperX + NeMo service initialized on {device}")
-    print(f"🔍 NeMo Status: {'✅ Available' if NEMO_AVAILABLE else '❌ Not Available'}")
+    print(f"WhisperX service initialized on {device}")
     
     # Start RunPod serverless handler
     print("Starting RunPod serverless handler...")
